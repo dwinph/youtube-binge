@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Binge (Oldest First)
 // @namespace    dwinph.youtube-binge
-// @version      0.1.0
+// @version      0.1.1
 // @description  Binge a channel's uploads oldest to newest on real YouTube, so watch history and progress land on your own account.
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -371,5 +371,6 @@
   window.addEventListener('yt-navigate-finish', () => render());
   window.addEventListener('popstate', () => render());
   setInterval(() => render(), 1000);
+  LOG('loaded v0.1.1 on', location.href, '| page context:', !!window.ytcfg);
   render(true);
 })();
