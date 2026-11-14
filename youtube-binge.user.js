@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Binge (Oldest First)
 // @namespace    dwinph.youtube-binge
-// @version      0.3.0
+// @version      0.4.0
 // @description  Binge a channel's uploads oldest to newest on real YouTube, so watch history and progress land on your own account.
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -110,20 +110,27 @@
   const textOf = (t) =>
     (t && (t.simpleText ?? (t.runs && t.runs.map((r) => r.text).join('')) ?? t.content)) || '';
 
+  const VIDEO_KEYS = new Set(['playlistVideoRenderer', 'videoRenderer', 'gridVideoRenderer',
+    'videoWithContextRenderer', 'compactVideoRenderer', 'playlistPanelVideoRenderer']);
+
   // Pull video items and the next-page token out of a playlist browse response.
   function parsePlaylistPage(json) {
     const items = [];
     let token = null;
     walk(json, (k, v) => {
-      if ((k === 'playlistVideoRenderer' || k === 'videoRenderer' || k === 'gridVideoRenderer') && v && v.videoId) {
+      // Desktop: playlistVideoRenderer / videoRenderer / gridVideoRenderer.
+      // Mobile site (m.youtube.com): videoWithContextRenderer / compactVideoRenderer.
+      if (VIDEO_KEYS.has(k) && v && v.videoId) {
         if (v.isPlayable === false) return false; // private or deleted
         let pct = 0;
         walk(v.thumbnailOverlays, (k2, v2) => {
           if (k2 === 'thumbnailOverlayResumePlaybackRenderer') pct = v2.percentDurationWatched || 0;
         });
-        items.push({ id: v.videoId, t: textOf(v.title), w: pct });
+        items.push({ id: v.videoId, t: textOf(v.title) || textOf(v.headline), w: pct });
         return false;
       }
+      // Older/mobile style next-page token.
+      if (k === 'nextContinuationData' && v && v.continuation) { token = v.continuation; return false; }
       if (k === 'lockupViewModel' && v && v.contentId && String(v.contentType || 'VIDEO').includes('VIDEO')) {
         let pct = 0;
         let title = '';
@@ -161,17 +168,43 @@
   }
 
   // Find the sort chips (Latest / Popular / Oldest) on a channel's Videos tab.
+  // Handles desktop chips, newer chipViewModel, and mobile-style sort sub-menus.
+  // Each result has either a continuation token or a browse request to run.
+  const SORT_LABEL = /^(latest|newest|popular|oldest)$/i;
+  function sortActionOf(node) {
+    let token = null;
+    let browse = null;
+    walk(node, (k, v) => {
+      if (!token && k === 'continuationCommand' && v && v.token) token = v.token;
+      if (!token && k === 'nextContinuationData' && v && v.continuation) token = v.continuation;
+      if (!browse && k === 'browseEndpoint' && v && v.browseId && v.params) browse = { browseId: v.browseId, params: v.params };
+    });
+    return token ? { token } : browse ? { browse } : null;
+  }
   function findSortChips(json) {
     const chips = [];
-    walk(json, (k, v) => {
-      if ((k === 'chipCloudChipRenderer' || k === 'chipViewModel') && v) {
-        let token = null;
-        walk(v, (k2, v2) => { if (!token && k2 === 'continuationCommand' && v2.token) token = v2.token; });
-        const label = textOf(v.text) || (typeof v.text === 'string' ? v.text : '') || textOf(v.title) || '';
-        if (token) chips.push({ label, token });
-        return false;
+    const seen = new Set();
+    const visitObj = (o) => {
+      if (!o || typeof o !== 'object') return;
+      if (Array.isArray(o)) { o.forEach(visitObj); return; }
+      const raw = o.text ?? o.title ?? o.label;
+      const label = (typeof raw === 'string' ? raw : textOf(raw)).trim();
+      const isChipKind = o.chipCloudChipRenderer || o.chipViewModel;
+      if (isChipKind) {
+        const c = o.chipCloudChipRenderer || o.chipViewModel;
+        const r = c.text ?? c.title;
+        const l = (typeof r === 'string' ? r : textOf(r)).trim();
+        const act = sortActionOf(c);
+        if (act && !seen.has(l)) { seen.add(l); chips.push({ label: l, chip: true, ...act }); }
+        return;
       }
-    });
+      if (label && SORT_LABEL.test(label) && !seen.has(label)) {
+        const act = sortActionOf(o);
+        if (act) { seen.add(label); chips.push({ label, ...act }); return; }
+      }
+      for (const k of Object.keys(o)) visitObj(o[k]);
+    };
+    visitObj(json);
     return chips;
   }
 
@@ -188,9 +221,10 @@
     const tab = await api('browse', { browseId: channelId, params: params || 'EgZ2aWRlb3PyBgQKAjoA' });
     const chips = findSortChips(tab);
     LOG('sort chips:', chips.map((c) => c.label).join(', ') || '(none)');
-    const oldest = chips.find((c) => /oldest/i.test(c.label)) || (chips.length === 3 ? chips[2] : null);
+    const chipOnly = chips.filter((c) => c.chip);
+    const oldest = chips.find((c) => /oldest/i.test(c.label)) || (chipOnly.length === 3 ? chipOnly[2] : null);
     if (oldest) {
-      const sorted = await api('browse', { continuation: oldest.token });
+      const sorted = await api('browse', oldest.token ? { continuation: oldest.token } : oldest.browse);
       const items = await collectPages(sorted, onProgress);
       if (items.length) return { items, source: 'videos-tab-oldest' };
     }
@@ -202,31 +236,39 @@
 
   // Load every video of a channel, oldest first.
   async function fetchUploads(channelId, onProgress) {
+    let tabResult = null;
     try {
-      const r = await fetchVideosTabOldest(channelId, onProgress);
-      if (r) { logSummary(r); return r; }
-    } catch (e) { LOG('videos tab failed, falling back to uploads playlist', e); }
-    // Fallback: the hidden uploads playlist, newest first, flipped.
-    // UULF = long-form videos only (no Shorts or past livestreams); UU = everything.
+      tabResult = await fetchVideosTabOldest(channelId, onProgress);
+      // Best case: YouTube's own Oldest sort worked.
+      if (tabResult && tabResult.source === 'videos-tab-oldest') { logSummary(tabResult); return tabResult; }
+    } catch (e) { LOG('videos tab failed, trying uploads playlist', e); }
+    // Otherwise try the hidden uploads playlist (newest first, flipped) and keep
+    // whichever list is longer, so a missed next page can't leave us with only 20.
+    const playlistResult = await fetchUploadsPlaylist(channelId, onProgress).catch((e) => { LOG(e); return null; });
+    const pick = [tabResult, playlistResult].filter(Boolean)
+      .sort((a, b) => b.items.length - a.items.length)[0];
+    if (!pick) throw new Error("Could not load this channel's uploads.");
+    logSummary(pick);
+    return pick;
+  }
+
+  // UULF = long-form videos only (no Shorts or past livestreams); UU = everything.
+  async function fetchUploadsPlaylist(channelId, onProgress) {
     const base = channelId.slice(2);
     for (const prefix of ['UULF', 'UU']) {
-      const all = [];
-      const seen = new Set();
-      let json = await api('browse', { browseId: `VL${prefix}${base}` }).catch((e) => { LOG(prefix, e); return null; });
-      for (let page = 0; json && page < 500; page++) {
-        const { items, token } = parsePlaylistPage(json);
-        let added = 0;
-        for (const it of items) {
-          if (!seen.has(it.id)) { seen.add(it.id); all.push(it); added++; }
-        }
-        if (onProgress) onProgress(all.length);
-        if (!token || !added) break;
-        json = await api('browse', { continuation: token });
-      }
-      if (all.length) { const r = { items: all.reverse(), source: prefix }; logSummary(r); return r; }
+      const first = await api('browse', { browseId: `VL${prefix}${base}` }).catch((e) => { LOG(prefix, e); return null; });
+      const items = first ? await collectPages(first, onProgress) : [];
+      if (items.length) return { items: items.reverse(), source: `uploads-playlist-${prefix}` };
     }
-    throw new Error("Could not load this channel's uploads.");
+    return null;
   }
+
+  const SOURCE_LABEL = {
+    'videos-tab-oldest': 'Videos tab, Oldest sort',
+    'videos-tab-reversed': 'Videos tab, reversed (no Oldest sort found)',
+    'uploads-playlist-UULF': 'Uploads playlist (by upload date)',
+    'uploads-playlist-UU': 'Uploads playlist, all types (by upload date)',
+  };
 
   function logSummary(r) {
     const first = r.items[0];
@@ -331,6 +373,7 @@
     button[disabled] { opacity: .5; pointer-events: none; }
     .card.wide { width: min(420px, calc(100vw - 32px)); max-width: none; }
     .next { margin-bottom: 8px; font-weight: 500; }
+    .source { font-size: 11px; opacity: .6; margin-bottom: 8px; }
     input { all: unset; box-sizing: border-box; width: 100%; background: #2a2a2a; color: #fff;
       border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; }
     .list { max-height: min(50vh, 420px); overflow-y: auto; margin-bottom: 8px;
@@ -389,6 +432,7 @@
       h('div', { class: 'title' }, `Binge: ${q.name}`),
       h('div', { class: 'status' }, info),
       start >= 0 ? h('div', { class: 'next' }, label(q, start)) : null,
+      h('div', { class: 'source' }, `Source: ${SOURCE_LABEL[q.source] || q.source}`),
       row);
   }
 
@@ -515,6 +559,6 @@
   window.addEventListener('yt-navigate-finish', () => render());
   window.addEventListener('popstate', () => render());
   setInterval(() => render(), 1000);
-  LOG('loaded v0.3.0 on', location.href, '| page context:', !!window.ytcfg);
+  LOG('loaded v0.4.0 on', location.href, '| page context:', !!window.ytcfg);
   render(true);
 })();
