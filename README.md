@@ -12,7 +12,7 @@ A Safari userscript that plays a YouTube channel's videos from oldest to newest,
 
 Click the same button later to pick up where you left off. It reloads the list and starts at the first video you haven't finished.
 
-By default it uses the channel's long-form uploads only, without Shorts or past livestreams. If a channel has no regular videos, it falls back to all uploads.
+The list comes from the channel's **Videos** tab, using YouTube's own **Oldest** sort, so the order matches what you see on the site. Shorts and livestreams have their own tabs and aren't included. If the Videos tab can't be read, it falls back to the channel's hidden uploads playlist, which goes by upload date and can differ slightly. The console line starting with `[yt-binge] loaded` tells you which source was used.
 
 Your queue position is saved in Safari's storage for youtube.com, on that device. Your watch history itself lives on your YouTube account.
 

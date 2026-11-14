@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Binge (Oldest First)
 // @namespace    dwinph.youtube-binge
-// @version      0.2.0
+// @version      0.3.0
 // @description  Binge a channel's uploads oldest to newest on real YouTube, so watch history and progress land on your own account.
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -115,7 +115,7 @@
     const items = [];
     let token = null;
     walk(json, (k, v) => {
-      if (k === 'playlistVideoRenderer' && v && v.videoId) {
+      if ((k === 'playlistVideoRenderer' || k === 'videoRenderer' || k === 'gridVideoRenderer') && v && v.videoId) {
         if (v.isPlayable === false) return false; // private or deleted
         let pct = 0;
         walk(v.thumbnailOverlays, (k2, v2) => {
@@ -142,9 +142,72 @@
     return { items, token };
   }
 
-  // Load every upload of a channel, then flip to oldest first.
-  // UULF = long-form videos only (no Shorts or past livestreams); UU = everything.
+  // Follow continuation pages until the list ends. Returns items in the order YouTube gives them.
+  async function collectPages(firstJson, onProgress) {
+    const all = [];
+    const seen = new Set();
+    let json = firstJson;
+    for (let page = 0; json && page < 1000; page++) {
+      const { items, token } = parsePlaylistPage(json);
+      let added = 0;
+      for (const it of items) {
+        if (!seen.has(it.id)) { seen.add(it.id); all.push(it); added++; }
+      }
+      if (onProgress) onProgress(all.length);
+      if (!token || !added) break;
+      json = await api('browse', { continuation: token });
+    }
+    return all;
+  }
+
+  // Find the sort chips (Latest / Popular / Oldest) on a channel's Videos tab.
+  function findSortChips(json) {
+    const chips = [];
+    walk(json, (k, v) => {
+      if ((k === 'chipCloudChipRenderer' || k === 'chipViewModel') && v) {
+        let token = null;
+        walk(v, (k2, v2) => { if (!token && k2 === 'continuationCommand' && v2.token) token = v2.token; });
+        const label = textOf(v.text) || (typeof v.text === 'string' ? v.text : '') || textOf(v.title) || '';
+        if (token) chips.push({ label, token });
+        return false;
+      }
+    });
+    return chips;
+  }
+
+  // Preferred source: the channel's Videos tab, sorted by YouTube's own "Oldest" option,
+  // so the order matches exactly what you see on the site.
+  async function fetchVideosTabOldest(channelId, onProgress) {
+    const home = await api('browse', { browseId: channelId });
+    let params = null;
+    walk(home, (k, v) => {
+      if (params || k !== 'tabRenderer' || !v || !v.endpoint) return;
+      const url = (((v.endpoint.commandMetadata || {}).webCommandMetadata) || {}).url || '';
+      if (/\/videos$/.test(url) && v.endpoint.browseEndpoint) params = v.endpoint.browseEndpoint.params;
+    });
+    const tab = await api('browse', { browseId: channelId, params: params || 'EgZ2aWRlb3PyBgQKAjoA' });
+    const chips = findSortChips(tab);
+    LOG('sort chips:', chips.map((c) => c.label).join(', ') || '(none)');
+    const oldest = chips.find((c) => /oldest/i.test(c.label)) || (chips.length === 3 ? chips[2] : null);
+    if (oldest) {
+      const sorted = await api('browse', { continuation: oldest.token });
+      const items = await collectPages(sorted, onProgress);
+      if (items.length) return { items, source: 'videos-tab-oldest' };
+    }
+    // No Oldest chip: load the tab newest-first and flip it.
+    const items = await collectPages(tab, onProgress);
+    if (items.length) return { items: items.reverse(), source: 'videos-tab-reversed' };
+    return null;
+  }
+
+  // Load every video of a channel, oldest first.
   async function fetchUploads(channelId, onProgress) {
+    try {
+      const r = await fetchVideosTabOldest(channelId, onProgress);
+      if (r) { logSummary(r); return r; }
+    } catch (e) { LOG('videos tab failed, falling back to uploads playlist', e); }
+    // Fallback: the hidden uploads playlist, newest first, flipped.
+    // UULF = long-form videos only (no Shorts or past livestreams); UU = everything.
     const base = channelId.slice(2);
     for (const prefix of ['UULF', 'UU']) {
       const all = [];
@@ -160,9 +223,15 @@
         if (!token || !added) break;
         json = await api('browse', { continuation: token });
       }
-      if (all.length) return { items: all.reverse(), source: prefix };
+      if (all.length) { const r = { items: all.reverse(), source: prefix }; logSummary(r); return r; }
     }
     throw new Error("Could not load this channel's uploads.");
+  }
+
+  function logSummary(r) {
+    const first = r.items[0];
+    const last = r.items[r.items.length - 1];
+    LOG(`loaded ${r.items.length} videos from ${r.source}; first: "${first && first.t}", last: "${last && last.t}"`);
   }
 
   // ---------------------------------------------------------------------------
@@ -446,6 +515,6 @@
   window.addEventListener('yt-navigate-finish', () => render());
   window.addEventListener('popstate', () => render());
   setInterval(() => render(), 1000);
-  LOG('loaded v0.2.0 on', location.href, '| page context:', !!window.ytcfg);
+  LOG('loaded v0.3.0 on', location.href, '| page context:', !!window.ytcfg);
   render(true);
 })();
