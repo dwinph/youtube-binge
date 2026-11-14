@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Binge (Oldest First)
 // @namespace    dwinph.youtube-binge
-// @version      0.1.1
+// @version      0.2.0
 // @description  Binge a channel's uploads oldest to newest on real YouTube, so watch history and progress land on your own account.
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -260,6 +260,19 @@
     button.primary { background: #cc0000; }
     button.primary:hover { background: #e00000; }
     button[disabled] { opacity: .5; pointer-events: none; }
+    .card.wide { width: min(420px, calc(100vw - 32px)); max-width: none; }
+    .next { margin-bottom: 8px; font-weight: 500; }
+    input { all: unset; box-sizing: border-box; width: 100%; background: #2a2a2a; color: #fff;
+      border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; }
+    .list { max-height: min(50vh, 420px); overflow-y: auto; margin-bottom: 8px;
+      border-radius: 8px; background: #1a1a1a; }
+    .item { display: flex; gap: 8px; padding: 6px 8px; cursor: pointer; align-items: baseline; }
+    .item:hover { background: #333; }
+    .item.current { background: #4a1010; }
+    .item.watched .name { opacity: .55; }
+    .num { min-width: 3em; text-align: right; opacity: .6; font-variant-numeric: tabular-nums; }
+    .mark { width: 1em; color: #6c6; }
+    .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .min { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; }
   `));
   const mount = h('div');
@@ -280,10 +293,7 @@
         status.textContent = 'Finding channel…';
         const ch = await resolveChannel();
         const q = await buildQueue(ch.id, ch.name, (n) => { status.textContent = `Loading uploads… ${n}`; });
-        const start = nextUnwatched(q.items, 0);
-        if (start < 0) { status.textContent = `All ${q.items.length} videos already watched.`; return; }
-        status.textContent = `Starting video ${start + 1} of ${q.items.length}…`;
-        go(q.items[start].id);
+        setView(readyView(ch.id, q));
       } catch (e) {
         status.textContent = e.message || String(e);
         LOG(e);
@@ -294,11 +304,75 @@
     return h('div', { class: 'card' }, h('div', { class: 'title' }, 'YouTube Binge'), status, h('div', { class: 'row' }, btn));
   }
 
+  const label = (q, idx) => `#${idx + 1} ${q.items[idx].t || q.items[idx].id}`;
+
+  // Shown after the list loads: confirm the suggested video or choose another.
+  function readyView(cid, q) {
+    const start = nextUnwatched(q.items, 0);
+    const done = q.items.filter((x) => x.w >= WATCHED_PCT).length;
+    const info = start < 0
+      ? `All ${q.items.length} videos are watched.`
+      : `${q.items.length} videos, ${done} watched. Next up:`;
+    const row = h('div', { class: 'row' });
+    if (start >= 0) row.append(h('button', { class: 'primary', onclick: () => startAt(cid, start) }, `▶ Play #${start + 1}`));
+    row.append(h('button', { onclick: () => setView(pickerView(cid, () => setView(readyView(cid, load().queues[cid])))) }, 'Choose video…'));
+    return h('div', { class: 'card' },
+      h('div', { class: 'title' }, `Binge: ${q.name}`),
+      h('div', { class: 'status' }, info),
+      start >= 0 ? h('div', { class: 'next' }, label(q, start)) : null,
+      row);
+  }
+
+  function startAt(cid, idx) {
+    const s = load();
+    const q = s.queues[cid];
+    if (!q || !q.items[idx]) return;
+    s.active = cid;
+    s.paused = false;
+    q.pos = idx;
+    save(s);
+    go(q.items[idx].id);
+  }
+
+  // Scrollable, searchable list of the whole queue, oldest first.
+  function pickerView(cid, onBack) {
+    const q = load().queues[cid];
+    const list = h('div', { class: 'list' });
+    const rows = q.items.map((it, idx) => {
+      const watched = it.w >= WATCHED_PCT;
+      const el = h('div', { class: 'item' + (idx === q.pos ? ' current' : '') + (watched ? ' watched' : ''),
+        title: it.t, onclick: () => startAt(cid, idx) },
+        h('span', { class: 'num' }, String(idx + 1)),
+        h('span', { class: 'mark' }, watched ? '✓' : it.w > 0 ? '◐' : ''),
+        h('span', { class: 'name' }, it.t || it.id));
+      list.append(el);
+      return el;
+    });
+    const search = h('input', { type: 'search', placeholder: 'Search titles or type a number' });
+    // Keep YouTube's keyboard shortcuts from grabbing what you type.
+    for (const ev of ['keydown', 'keyup', 'keypress']) search.addEventListener(ev, (e) => e.stopPropagation());
+    search.addEventListener('input', () => {
+      const term = search.value.trim().toLowerCase();
+      rows.forEach((el, idx) => {
+        const hit = !term || String(idx + 1) === term || (q.items[idx].t || '').toLowerCase().includes(term);
+        el.style.display = hit ? '' : 'none';
+      });
+    });
+    const card = h('div', { class: 'card wide' },
+      h('div', { class: 'title' }, `Choose a video · ${q.name}`),
+      h('div', { class: 'status' }, 'Oldest at the top. Click one to play it and continue from there.'),
+      search, list,
+      h('div', { class: 'row' }, h('button', { onclick: onBack }, 'Back')));
+    requestAnimationFrame(() => { if (rows[q.pos]) rows[q.pos].scrollIntoView({ block: 'center' }); });
+    return card;
+  }
+
   function watchView(ctx) {
     const { q, cid, i } = ctx;
     const done = q.items.filter((x) => x.w >= WATCHED_PCT).length;
     const status = h('div', { class: 'status' },
-      `Video ${i + 1} of ${q.items.length} · ${done} watched` + (load().paused ? ' · paused' : ''));
+      `Video ${i + 1} of ${q.items.length} · ${done} watched` + (load().paused ? ' · paused' : ''),
+      h('br'), q.items[i].t || '');
 
     const jump = (idx) => { if (idx >= 0 && idx < q.items.length) go(q.items[idx].id); };
     const prev = h('button', { onclick: () => jump(i - 1) }, '⏮ Prev');
@@ -323,11 +397,12 @@
     } }, 'Stop');
 
     const hide = h('button', { onclick: () => { collapsed = true; render(true); } }, '–');
+    const pick = h('button', { onclick: () => setView(pickerView(cid, () => render(true))) }, 'List');
 
     return h('div', { class: 'card' },
       h('div', { class: 'title' }, `Binge: ${q.name}`),
       status,
-      h('div', { class: 'row' }, prev, next, pause, refresh, stop, hide));
+      h('div', { class: 'row' }, prev, next, pick, pause, refresh, stop, hide));
   }
 
   function collapsedView() {
@@ -371,6 +446,6 @@
   window.addEventListener('yt-navigate-finish', () => render());
   window.addEventListener('popstate', () => render());
   setInterval(() => render(), 1000);
-  LOG('loaded v0.1.1 on', location.href, '| page context:', !!window.ytcfg);
+  LOG('loaded v0.2.0 on', location.href, '| page context:', !!window.ytcfg);
   render(true);
 })();

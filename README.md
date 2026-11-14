@@ -6,8 +6,9 @@ A Safari userscript that plays a YouTube channel's videos from oldest to newest,
 
 1. Open any channel page, for example `youtube.com/@somechannel`.
 2. Click **▶ Binge oldest → newest** in the bottom-right corner.
-3. The script loads the channel's full upload list, flips it to oldest first, skips anything you've already watched (90% or more), and opens the first unwatched video.
-4. When a video ends, it opens the next one. A small panel on the watch page shows where you are and gives you Prev, Next, Pause auto-next, Refresh (picks up new uploads), Stop, and a minimize button.
+3. The script loads the channel's full upload list and flips it to oldest first. It then shows how many videos it found, how many you've watched, and which one is next up: the oldest video you haven't finished (90% or more counts as finished).
+4. Click **Play** to start there, or **Choose video…** to pick any video from the list. The list has a search box, and you can type a title or an episode number. Watched videos show a check mark, and half-watched ones show a half circle.
+5. When a video ends, the script opens the next unwatched one after it. A small panel on the watch page shows the video number and title, with Prev, Next, List (to jump anywhere), Pause auto-next, Refresh (picks up new uploads), Stop, and a minimize button.
 
 Click the same button later to pick up where you left off. It reloads the list and starts at the first video you haven't finished.
 
